@@ -367,21 +367,30 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   wireDrop(document.getElementById('dropInhouse'), els.fileInhouse, handleIncomingFile);
   wireDrop(document.getElementById('dropDepartures'), els.fileDepartures, handleIncomingFile);
 
-  // ---------- Detect which report a file is by scanning its first rows ----------
+  // ---------- Detect which report a file is, from its title row ----------
   function detectReportType(file) {
     return file.arrayBuffer().then(function (buf) {
       var wb = new ExcelJS.Workbook();
       return wb.xlsx.load(buf).then(function () {
         var ws = wb.worksheets[0];
-        var text = '';
-        for (var r = 1; r <= Math.min(10, ws.rowCount); r++) {
-          ws.getRow(r).eachCell({ includeEmpty: false }, function (cell) {
-            if (typeof cell.value === 'string') text += ' ' + cell.value;
-          });
-        }
-        text = text.toLowerCase();
-        if (text.indexOf('in-house') !== -1) return 'inhouse';
-        if (text.indexOf('departure') !== -1) return 'departures';
+
+        // Only the title on row 1 identifies the report — scanning further
+        // rows picks up per-guest fields like reservation status, which can
+        // itself contain the word "In-House" and cause false matches.
+        var titleText = '';
+        ws.getRow(1).eachCell({ includeEmpty: false }, function (cell) {
+          if (typeof cell.value === 'string') titleText += ' ' + cell.value;
+        });
+        titleText = titleText.toLowerCase();
+
+        if (titleText.indexOf('departures report') !== -1) return 'departures';
+        if (titleText.indexOf('in-house') !== -1) return 'inhouse';
+
+        // Fall back to the filename if the title row is missing or different.
+        var fname = file.name.toLowerCase();
+        if (fname.indexOf('res_021') !== -1 || fname.indexOf('departure') !== -1) return 'departures';
+        if (fname.indexOf('res_011') !== -1 || fname.indexOf('inhouse') !== -1 || fname.indexOf('in-house') !== -1) return 'inhouse';
+
         return 'unknown';
       });
     });
