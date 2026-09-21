@@ -201,7 +201,7 @@
       <div class="drop-icon">IH</div>
       <div class="drop-text">
         <div class="drop-title" id="dropInhouseTitle">In-House Guests Report</div>
-        <div class="drop-sub" id="dropInhouseSub">Click or drop the RES_011 InHouseDetailed .xlsx file</div>
+        <div class="drop-sub" id="dropInhouseSub">Click or drop the RES_011 Detailed or RES_012 Concise .xlsx file</div>
       </div>
     </label>
 
@@ -210,7 +210,7 @@
       <div class="drop-icon">D</div>
       <div class="drop-text">
         <div class="drop-title" id="dropDeparturesTitle">Departures Report</div>
-        <div class="drop-sub" id="dropDeparturesSub">Click or drop the RES_021 DeparturesDetailed .xlsx file</div>
+        <div class="drop-sub" id="dropDeparturesSub">Click or drop the RES_021 Detailed or RES_022 Concise .xlsx file</div>
       </div>
     </label>
 
@@ -238,8 +238,9 @@
 
   <details>
     <summary>How this works</summary>
-    <p>Each file is scanned for rows that start with a room number &mdash; that's treated as the start of a guest record, and the room number, guest name (and, for the in-house report, the adults/children count) are pulled out. Everything else &mdash; rates, membership, payment auth, travel agent noise &mdash; is discarded.</p>
+    <p>Each file is scanned for rows that start with a room number, or one of the named suites (Heaney, Larkin, Lewis, Friel, MacNeice) &mdash; that's treated as the start of a guest record, and the room, guest name (and, for the in-house report, the adults/children count) are pulled out. Everything else &mdash; rates, membership, payment auth, travel agent noise &mdash; is discarded.</p>
     <ul>
+      <li>Works with either the "Detailed" or "Concise" Shiji export of each report &mdash; both are read the same way and produce the same output.</li>
       <li>The in-house sheet is dated with today's date.</li>
       <li>The departures sheet is dated using the date found inside that report.</li>
       <li>Both sheets are set to print on A4 portrait, with the header row repeating on every printed page.</li>
@@ -388,12 +389,46 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
         // Fall back to the filename if the title row is missing or different.
         var fname = file.name.toLowerCase();
-        if (fname.indexOf('res_021') !== -1 || fname.indexOf('departure') !== -1) return 'departures';
-        if (fname.indexOf('res_011') !== -1 || fname.indexOf('inhouse') !== -1 || fname.indexOf('in-house') !== -1) return 'inhouse';
+        if (fname.indexOf('res_021') !== -1 || fname.indexOf('res_022') !== -1 || fname.indexOf('departure') !== -1) return 'departures';
+        if (fname.indexOf('res_011') !== -1 || fname.indexOf('res_012') !== -1 || fname.indexOf('inhouse') !== -1 || fname.indexOf('in-house') !== -1) return 'inhouse';
 
         return 'unknown';
       });
     });
+  }
+
+  // ---------- Locate the columns we need from the report's own header row ----------
+  // "Detailed" and "Concise" Shiji exports lay their columns out differently
+  // (Adults/Children sits in a different spot in each), so instead of
+  // assuming fixed column numbers we find them by their header text.
+  function findColumns(ws) {
+    var cols = { room: 1, name: 2, adultsChildren: null }; // sensible fallback
+    var headerRowNumber = null;
+
+    for (var r = 1; r <= Math.min(15, ws.rowCount); r++) {
+      var row = ws.getRow(r);
+      var found = false;
+      row.eachCell({ includeEmpty: false }, function (cell) {
+        if (typeof cell.value === 'string' && cell.value.trim() === 'Room #') found = true;
+      });
+      if (found) { headerRowNumber = r; break; }
+    }
+
+    if (headerRowNumber) {
+      var headerRow = ws.getRow(headerRowNumber);
+      headerRow.eachCell({ includeEmpty: false }, function (cell, colNumber) {
+        // Header labels like "Guest Name" are merged across two columns;
+        // only read the merge's master cell, or the same value gets picked
+        // up again on the slave cell and overwrites the correct column.
+        if (cell.master && cell.master.address !== cell.address) return;
+        var text = typeof cell.value === 'string' ? cell.value.trim() : '';
+        if (text === 'Room #') cols.room = colNumber;
+        else if (text === 'Guest Name') cols.name = colNumber;
+        else if (text === 'Adults/Children') cols.adultsChildren = colNumber;
+      });
+    }
+
+    return cols;
   }
 
   // ---------- Parsing raw Shiji export into clean records ----------
@@ -402,10 +437,16 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     var records = [];
     var reportDate = null;
     var dateRe = /^\d{2}\/\d{2}\/\d{4}$/;
-    var roomRe = /^\d+$/;
+    // A room is either a plain room number ("101") or one of the hotel's
+    // named suites, which appear in raw exports as a single ALL-CAPS token
+    // (e.g. "LARKIN", "HEANEY") — letters and spaces only, no digits or
+    // punctuation, which keeps this from matching report labels like "DNM"
+    // or "Multi-Res. Link".
+    var roomRe = /^(\d+|[A-Z][A-Z ]*)$/;
+    var cols = findColumns(ws);
 
     ws.eachRow({ includeEmpty: true }, function (row) {
-      var aCell = row.getCell(1);
+      var aCell = row.getCell(cols.room);
       // Skip merged cells that aren't the top-left (master) of their merge —
       // ExcelJS echoes the master's value onto every merged cell, which would
       // otherwise cause the same guest to be counted twice.
@@ -414,14 +455,22 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       var aVal = aCell.value;
       var aStr = (aVal === null || aVal === undefined) ? '' : String(aVal).trim();
 
+      // "DNM" (Do Not Move) is a report label, not a room — it can sit in a
+      // row whose neighbouring cell is merged with the guest record above,
+      // which would otherwise make it look like a valid guest row.
+      if (aStr === 'DNM') return;
+
       if (roomRe.test(aStr)) {
-        var bVal = row.getCell(2).value;
+        var bVal = row.getCell(cols.name).value;
         var name = (bVal === null || bVal === undefined) ? '' : String(bVal).trim();
         var adultsChildren = '';
-        if (isInhouse) {
-          var mVal = row.getCell(13).value; // column M
+        if (isInhouse && cols.adultsChildren) {
+          var mVal = row.getCell(cols.adultsChildren).value;
           adultsChildren = (mVal === null || mVal === undefined) ? '' : String(mVal).trim().replace(/\s+/g, '');
         }
+        // Guest rows always carry a "Last, First[, Title]" style name; report
+        // labels that happen to be all-caps (like "DNM") never have one, so
+        // requiring a name here is what keeps those labels out.
         if (name) records.push({ room: aStr, name: name, adultsChildren: adultsChildren });
       } else if (!reportDate && dateRe.test(aStr)) {
         var parts = aStr.split('/');
@@ -602,7 +651,6 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     });
   });
 })();
-
 </script>
 </body>
 </html>
