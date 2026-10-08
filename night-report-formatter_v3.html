@@ -242,7 +242,7 @@
     <ul>
       <li>Works with either the "Detailed" or "Concise" Shiji export of each report &mdash; both are read the same way and produce the same output.</li>
       <li>The in-house sheet is dated with today's date.</li>
-      <li>The departures sheet is dated using the date found inside that report.</li>
+      <li>The departures sheet is dated using the departure date found inside that report.</li>
       <li>Both sheets are set to print on A4 portrait, with the header row repeating on every printed page.</li>
       <li>Nothing is uploaded anywhere &mdash; both files are processed entirely on this device, in the browser.</li>
     </ul>
@@ -516,6 +516,18 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     ws.pageSetup.printTitlesRow = printTitleRange;
   }
 
+  // Add whole days using calendar arithmetic (handles month/year rollover).
+  function addDays(d, n) {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+  }
+
+  // Excel stores dates in UTC. A local-midnight Date (or one created after
+  // midnight in a timezone ahead of UTC, like UK summer time) can land on the
+  // previous day, so pin the calendar day itself at UTC midnight.
+  function toSheetDate(d) {
+    return d ? new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())) : null;
+  }
+
   // ---------- Build the in-house workbook ----------
   function buildInhouseWorkbook(records, dateObj) {
     var wb = new ExcelJS.Workbook();
@@ -528,7 +540,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     ws.mergeCells('A2:D2');
     styleTitleCell(titleRow.getCell(1));
 
-    var dateRow = ws.addRow([dateObj]);
+    var dateRow = ws.addRow([toSheetDate(dateObj)]);
     ws.mergeCells('A3:D3');
     dateRow.getCell(1).numFmt = 'd mmmm yyyy';
     styleTitleCell(dateRow.getCell(1));
@@ -561,7 +573,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     ws.mergeCells('A2:C2');
     styleTitleCell(titleRow.getCell(1));
 
-    var dateRow = ws.addRow([dateObj]);
+    var dateRow = ws.addRow([toSheetDate(dateObj)]);
     ws.mergeCells('A3:C3');
     if (dateObj) dateRow.getCell(1).numFmt = 'd mmmm yyyy';
     styleTitleCell(dateRow.getCell(1));
@@ -626,7 +638,10 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
       var today = new Date();
       var inhouseWb = buildInhouseWorkbook(inhouseParsed.records, today);
-      var departuresWb = buildDeparturesWorkbook(departuresParsed.records, departuresParsed.reportDate);
+      // Use the departure date printed inside the report itself; only if the
+      // report has no date at all, fall back to tomorrow.
+      var departuresDate = departuresParsed.reportDate || addDays(today, 1);
+      var departuresWb = buildDeparturesWorkbook(departuresParsed.records, departuresDate);
 
       return Promise.all([
         makeDownloadUrl(inhouseWb),
@@ -637,9 +652,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         els.inhouseSummary.textContent = inhouseParsed.records.length + ' guests';
 
         els.downloadDepartures.href = urls[1];
-        els.downloadDepartures.setAttribute('download', 'departures list' + dateForFilename(departuresParsed.reportDate) + '.xlsx');
+        els.downloadDepartures.setAttribute('download', 'departures list' + dateForFilename(departuresDate) + '.xlsx');
         els.departuresSummary.textContent = departuresParsed.records.length + ' guests' +
-          (departuresParsed.reportDate ? ', dated ' + departuresParsed.reportDate.toLocaleDateString('en-GB') : '');
+          ', dated ' + departuresDate.toLocaleDateString('en-GB');
 
         els.results.classList.add('show');
         setStatus('Done \u2014 both sheets are ready to download.');
